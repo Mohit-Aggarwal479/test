@@ -25,7 +25,10 @@ $sqlpermission = "
 $permissions = $database->get_results($sqlpermission);
 
 if (is_array($permissions) && count($permissions) > 0) {
-	if ($task === 'view' && isset($_GET['id']) && $_GET['id'] !== '') {
+	if ($task === 'dashboard') {
+		require_once($component_dir . "view_dashboard.php");
+		showDashboard();
+	} elseif ($task === 'view' && isset($_GET['id']) && $_GET['id'] !== '') {
 		require_once($component_dir . "view_detail.php");
 		showDeviceDetailsPage($_GET['id']);
 	} elseif ($task === 'calendar' && isset($_GET['view']) && $_GET['view'] === 'chart') {

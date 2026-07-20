@@ -9,6 +9,14 @@
    ============================================================================ */
 
 require_once __DIR__ . '/view_map.php';
+require_once __DIR__ . '/view_scheme.php';
+require_once __DIR__ . '/view_critical.php';
+require_once __DIR__ . '/view_trend.php';
+require_once __DIR__ . '/view_health.php';
+require_once __DIR__ . '/view_events.php';
+require_once __DIR__ . '/view_availability.php';
+require_once __DIR__ . '/view_reports.php';
+require_once __DIR__ . '/view_sensor.php';
 
 // Dashboard URL carrying the component + Cid (mirrors liCalendarUrl()).
 function liDashboardUrl($params = array())
@@ -30,7 +38,43 @@ function showDashboard()
 	$where = liDashboardWhere();
 	$stats = liDashboardStats($where);
 	$office_rows = liDashboardByOffice($where);
+	$scheme_rows = liSchemeWiseStatus($where);
+	$critical_rows = liCriticalLocations($where);
+	$trend_devices = liTrendDeviceOptions($where);
+	$trend_id = isset($_GET['trend']) ? $_GET['trend'] : '';
+	$trend_points = ($trend_id !== '') ? liWaterTrend($trend_id) : array();
+	$trend_now = time();
 	$markers = liMapMarkers($where);
+
+	// which tab is active on load (persisted across the picker/cascade reloads)
+	$valid_tabs = array('overview', 'health', 'scheme', 'critical', 'events', 'trend', 'availability', 'reports', 'sensor', 'map');
+	$active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], $valid_tabs, true)) ? $_GET['tab'] : 'overview';
+
+	// Sensor Health + Recent Events (light — always loaded)
+	$health = liSensorHealth($where);
+	$events = liRecentEvents($where);
+
+	// Daily Availability — only fetch data once a sensor/scheme is chosen
+	$av_device  = isset($_GET['avail_device']) ? $_GET['avail_device'] : '';
+	$av_scheme  = isset($_GET['avail_scheme']) ? $_GET['avail_scheme'] : '';
+	$av_days    = isset($_GET['avail_days']) ? (int) $_GET['avail_days'] : 30;
+	$av_schemes = liSchemeOptions();
+	$av_rows    = ($av_device !== '' || $av_scheme !== '') ? liDailyAvailabilityData($av_device, $av_scheme, $av_days) : array();
+
+	// Reports datasets are heavier — build them only when the Reports tab is open
+	$rep_daily = $rep_uptime = $rep_offline = $rep_monthly = array();
+	if ($active_tab === 'reports') {
+		$rep_daily   = liReportDailyPresence($where);
+		$rep_uptime  = liReportUptime($where);
+		$rep_offline = liReportOffline($where);
+		$rep_monthly = liReportMonthlyAvailability($where);
+	}
+
+	// Sensor Detail — fetch only when a sensor is picked
+	$detail_id = isset($_GET['detail']) ? $_GET['detail'] : '';
+	$sensor_detail = ($detail_id !== '') ? liSensorDetail($detail_id) : null;
+	$sensor_history = ($sensor_detail !== null) ? liSensorHistory($detail_id, 30) : array();
+	$sensor_analytics = ($sensor_detail !== null) ? liSensorAnalytics($detail_id) : array('avail_today' => 0, 'avail_7d_hours' => 0, 'avail_7d_pct' => 0, 'uptime_pct' => 0, 'changes' => 0);
 	$circles = liCircleOptions();
 	$divisions = liDivisionHierOptions();
 	$subdivs = liSubDivisionOptions();
@@ -85,6 +129,8 @@ function showDashboard()
 				<input type="hidden" name="c" value="<?php echo liEsc($component); ?>">
 				<input type="hidden" name="Cid" value="<?php echo liEsc($cid); ?>">
 				<input type="hidden" name="task" value="dashboard">
+				<?php // keep the active tab when filters are applied / a dropdown auto-submits ?>
+				<input type="hidden" name="tab" id="liFilterTab" value="<?php echo liEsc($active_tab); ?>">
 				<div class="card-body">
 					<div class="row">
 						<div class="col-md-3 col-6 mb-3">
@@ -116,7 +162,7 @@ function showDashboard()
 								<?php } ?>
 							</select>
 						</div>
-						<!-- <div class="col-md-3 col-6 mb-3">
+						<div class="col-md-3 col-6 mb-3">
 							<label class="form-label">Sub-Division</label>
 							<?php // only the selected Division's sub-divisions are rendered; locked until a Division is chosen ?>
 							<select name="subdiv" id="liFSubdiv" class="form-control" onchange="liPick('subdiv')" <?php echo $f_division === '' ? 'disabled' : ''; ?>>
@@ -131,7 +177,7 @@ function showDashboard()
 										<?php echo liText($sd['name']); ?></option>
 								<?php } ?>
 							</select>
-						</div> -->
+						</div>
 						<div class="col-md-3 col-6 mb-3">
 							<label class="form-label">Lift Irrigation Scheme</label>
 							<select name="scheme" class="form-control">
@@ -171,7 +217,7 @@ function showDashboard()
 
 					<div class="li-dash-actions">
 						<button type="submit" class="btn btn-primary">Apply Filters</button>
-						<a href="<?php echo liEsc(liDashboardUrl()); ?>" class="btn btn-secondary">Reset Filters</a>
+						<a href="<?php echo liEsc(liDashboardUrl(array('tab' => $active_tab))); ?>" class="btn btn-secondary">Reset Filters</a>
 						<button type="button" class="btn li-btn-export" onclick="liDashExport()">Export Report</button>
 						<span class="li-dash-links">
 							<a href="<?php echo liEsc(liListUrl()); ?>">Listing</a> &middot;
@@ -183,11 +229,26 @@ function showDashboard()
 
 			<!-- ============ TABS ============ -->
 			<ul class="li-tabs">
-				<li class="li-tab active" data-tab="overview">Summary Statistics</li>
-				<li class="li-tab" data-tab="map">State Map View</li>
+				<?php
+				$tab_labels = array(
+					'overview'     => 'Overview',
+					'health'       => 'Sensor Health',
+					'scheme'       => 'Scheme-wise Status',
+					'critical'     => 'Critical Locations',
+					'events'       => 'Recent Events',
+					'trend'        => 'Water Presence Trend',
+					'availability' => 'Daily Availability',
+					'reports'      => 'Reports',
+					'sensor'       => 'Sensor Detail',
+					'map'          => 'State Map View',
+				);
+				foreach ($tab_labels as $tk => $tl) {
+					echo '<li class="li-tab' . ($active_tab === $tk ? ' active' : '') . '" data-tab="' . $tk . '">' . liEsc($tl) . '</li>';
+				}
+				?>
 			</ul>
 
-			<div class="li-tab-pane" id="tab-overview">
+			<div class="li-tab-pane" id="tab-overview" style="display:<?php echo $active_tab === 'overview' ? '' : 'none'; ?>;">
 
 			<!-- ============ SUMMARY STATISTICS ============ -->
 			<div class="li-tiles">
@@ -254,8 +315,86 @@ function showDashboard()
 
 			</div><!-- /tab-overview -->
 
+			<!-- ============ SENSOR HEALTH ============ -->
+			<div class="li-tab-pane" id="tab-health" style="display:<?php echo $active_tab === 'health' ? '' : 'none'; ?>;">
+				<div class="card">
+					<div class="card-body">
+						<h4 class="li-report-title">Sensor Health Dashboard</h4>
+						<?php liHealthPane($health); ?>
+					</div>
+				</div>
+			</div>
+
+			<!-- ============ SCHEME-WISE STATUS ============ -->
+			<div class="li-tab-pane" id="tab-scheme" style="display:<?php echo $active_tab === 'scheme' ? '' : 'none'; ?>;">
+				<div class="card">
+					<div class="card-body">
+						<?php liSchemePane($scheme_rows); ?>
+					</div>
+				</div>
+			</div>
+
+			<!-- ============ CRITICAL LOCATIONS ============ -->
+			<div class="li-tab-pane" id="tab-critical" style="display:<?php echo $active_tab === 'critical' ? '' : 'none'; ?>;">
+				<div class="card">
+					<div class="card-body">
+						<?php liCriticalPane($critical_rows); ?>
+					</div>
+				</div>
+			</div>
+
+			<!-- ============ RECENT EVENTS ============ -->
+			<div class="li-tab-pane" id="tab-events" style="display:<?php echo $active_tab === 'events' ? '' : 'none'; ?>;">
+				<div class="card">
+					<div class="card-body">
+						<h4 class="li-report-title">Recent Events</h4>
+						<?php liEventsPane($events); ?>
+					</div>
+				</div>
+			</div>
+
+			<!-- ============ WATER PRESENCE TREND ============ -->
+			<div class="li-tab-pane" id="tab-trend" style="display:<?php echo $active_tab === 'trend' ? '' : 'none'; ?>;">
+				<div class="card">
+					<div class="card-body">
+						<h4 class="li-report-title">Water Presence Trend (24 Hours)</h4>
+						<?php liTrendPane($trend_devices, $trend_id, $trend_points, $trend_now); ?>
+					</div>
+				</div>
+			</div>
+
+			<!-- ============ DAILY WATER AVAILABILITY ============ -->
+			<div class="li-tab-pane" id="tab-availability" style="display:<?php echo $active_tab === 'availability' ? '' : 'none'; ?>;">
+				<div class="card">
+					<div class="card-body">
+						<h4 class="li-report-title">Daily Water Availability</h4>
+						<?php liAvailabilityPane($trend_devices, $av_schemes, $av_device, $av_scheme, $av_days, $av_rows); ?>
+					</div>
+				</div>
+			</div>
+
+			<!-- ============ REPORTS ============ -->
+			<div class="li-tab-pane" id="tab-reports" style="display:<?php echo $active_tab === 'reports' ? '' : 'none'; ?>;">
+				<div class="card">
+					<div class="card-body">
+						<h4 class="li-report-title">Reports Module</h4>
+						<?php liReportsPane($rep_daily, $scheme_rows, $rep_uptime, $rep_offline, $rep_monthly); ?>
+					</div>
+				</div>
+			</div>
+
+			<!-- ============ SENSOR DETAIL ============ -->
+			<div class="li-tab-pane" id="tab-sensor" style="display:<?php echo $active_tab === 'sensor' ? '' : 'none'; ?>;">
+				<div class="card">
+					<div class="card-body">
+						<h4 class="li-report-title">Sensor Detail Page</h4>
+						<?php liSensorPane($trend_devices, $detail_id, $sensor_detail, $sensor_history, $sensor_analytics); ?>
+					</div>
+				</div>
+			</div>
+
 			<!-- ============ STATE MAP VIEW ============ -->
-			<div class="li-tab-pane" id="tab-map" style="display:none;">
+			<div class="li-tab-pane" id="tab-map" style="display:<?php echo $active_tab === 'map' ? '' : 'none'; ?>;">
 				<div class="card">
 					<div class="card-body">
 						<?php liMapPane($markers); ?>
@@ -299,21 +438,36 @@ function showDashboard()
 		// Leaflet library is only fetched the first time its tab is opened.
 		(function () {
 			var tabs = document.querySelectorAll('.li-tab');
-			function activate(name) {
+			var panes = { overview: 'tab-overview', health: 'tab-health', scheme: 'tab-scheme', critical: 'tab-critical', events: 'tab-events', trend: 'tab-trend', availability: 'tab-availability', reports: 'tab-reports', sensor: 'tab-sensor', map: 'tab-map' };
+			function activate(name, push) {
 				for (var i = 0; i < tabs.length; i++) {
 					tabs[i].classList.toggle('active', tabs[i].getAttribute('data-tab') === name);
 				}
-				var ov = document.getElementById('tab-overview');
-				var mp = document.getElementById('tab-map');
-				if (ov) ov.style.display = (name === 'overview') ? '' : 'none';
-				if (mp) mp.style.display = (name === 'map') ? '' : 'none';
+				for (var key in panes) {
+					var el = document.getElementById(panes[key]);
+					if (el) el.style.display = (key === name) ? '' : 'none';
+				}
+				// keep the top filter bar's hidden tab field pointing at this tab,
+				// so applying filters (or a cascade auto-submit) stays here
+				var ft = document.getElementById('liFilterTab');
+				if (ft) ft.value = name;
 				if (name === 'map' && typeof liInitMap === 'function') liInitMap();
+				// remember the tab in the URL so a refresh / picker reload stays put
+				if (push && window.history && history.replaceState) {
+					try {
+						var u = new URL(window.location.href);
+						u.searchParams.set('tab', name);
+						history.replaceState(null, '', u.toString());
+					} catch (e) { }
+				}
 			}
 			for (var i = 0; i < tabs.length; i++) {
 				(function (t) {
-					t.addEventListener('click', function () { activate(t.getAttribute('data-tab')); });
+					t.addEventListener('click', function () { activate(t.getAttribute('data-tab'), true); });
 				})(tabs[i]);
 			}
+			// honor the server-rendered active tab on load (inits the map if it opens there)
+			activate(<?php echo json_encode($active_tab); ?>, false);
 		})();
 
 		// Export the summary + active filters as a CSV (client-side, no reload).

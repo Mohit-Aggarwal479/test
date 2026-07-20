@@ -208,6 +208,8 @@ function showRecordsListing(&$rows)
 						<h3>Lift Irrigation Monitoring</h3>
 					</div>
 					<div class="col-md-4 text-right">
+						<a href="<?php echo liEsc('index.php?c=' . rawurlencode($component) . '&Cid=' . rawurlencode(isset($_GET['Cid']) ? $_GET['Cid'] : $menuid['component_headingid']) . '&task=dashboard'); ?>"
+							class="btn btn-primary" style="margin-right:6px;">Dashboard</a>
 						<a href="<?php echo liEsc(liCalendarUrl()); ?>" class="btn btn-primary"
 							style="margin-right:6px;">Calendar View</a>
 						<a href="<?php echo liEsc(liListUrl()); ?>" class="btn btn-secondary"
